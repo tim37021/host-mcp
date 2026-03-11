@@ -3,6 +3,9 @@
   "module": "index.ts",
   "type": "module",
   "private": true,
+  "scripts": {
+    "host": "bun run index.ts",
+  },
   "devDependencies": {
     "@types/bun": "latest",
     "@types/cors": "^2.8.19",
@@ -13,9 +16,11 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
+    "@types/turndown": "^5.0.6",
     "cors": "^2.8.6",
     "eventsource": "^4.1.0",
     "express": "^5.2.1",
+    "turndown": "^7.2.2",
     "zod": "^4.3.6"
   }
 }

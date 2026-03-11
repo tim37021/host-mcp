@@ -12,6 +12,7 @@ import * as fs from "fs/promises";
 import * as path from "path";
 import { exec } from "child_process";
 import { promisify } from "util";
+import TurndownService from "turndown";
 
 const execAsync = promisify(exec);
 
@@ -222,12 +223,35 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
           },
           required: ["command"],
-        },
-      },
-    ],
-  };
-});
-
+          },
+          },
+          {
+          name: "fetch",
+          description: "Fetch a URL and return its content. If the content is HTML, it will be converted to Markdown.",
+          inputSchema: {
+          type: "object",
+          properties: {
+            url: {
+              type: "string",
+              description: "The URL to fetch",
+            },
+            raw: {
+              type: "boolean",
+              description: "If true, return the raw content without Markdown conversion",
+              default: false,
+            },
+            ignore_images: {
+              type: "boolean",
+              description: "If true, ignore images during Markdown conversion",
+              default: false,
+            },
+          },
+          required: ["url"],
+          },
+          },
+          ],
+          };
+          });
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
@@ -428,21 +452,79 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         content: [{ type: "text", text: output || "Command executed successfully with no output." }],
       };
     } catch (error: any) {
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Command failed: ${error.message}\nSTDOUT:\n${error.stdout || ""}\nSTDERR:\n${error.stderr || ""}`,
+        },
+      ],
+      isError: true,
+    };
+    }
+    }
+
+    if (name === "fetch") {
+    const parsedArgs = z.object({ 
+    url: z.string().url(),
+    raw: z.boolean().optional().default(false),
+    ignore_images: z.boolean().optional().default(false)
+    }).safeParse(args);
+
+    if (!parsedArgs.success) {
+    throw new Error(`Invalid arguments for fetch: ${parsedArgs.error.message}`);
+    }
+
+    const { url, raw, ignore_images } = parsedArgs.data;
+
+    try {
+    const response = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (compatible; WebFetch-MCP/1.0; +https://github.com/modelcontextprotocol)",
+      },
+    });
+
+    if (!response.ok) {
       return {
-        content: [
-          {
-            type: "text",
-            text: `Command failed: ${error.message}\nSTDOUT:\n${error.stdout || ""}\nSTDERR:\n${error.stderr || ""}`,
-          },
-        ],
+        content: [{ type: "text", text: `Error fetching URL: ${response.status} ${response.statusText}` }],
         isError: true,
       };
     }
-  }
 
-  throw new Error(`Unknown tool: ${name}`);
-});
+    const contentType = response.headers.get("content-type") || "";
+    const text = await response.text();
 
+    if (!raw && contentType.includes("text/html")) {
+      const currentTurndown = new TurndownService({
+        headingStyle: "atx",
+        codeBlockStyle: "fenced",
+      });
+      currentTurndown.remove(["script", "style", "noscript"]);
+      if (ignore_images) {
+        currentTurndown.addRule("ignore-images", {
+          filter: "img",
+          replacement: () => "",
+        });
+      }
+      const markdown = currentTurndown.turndown(text);
+      return {
+        content: [{ type: "text", text: markdown }],
+      };
+    }
+
+    return {
+      content: [{ type: "text", text: text }],
+    };
+    } catch (error: any) {
+    return {
+      content: [{ type: "text", text: `Error: ${error.message}` }],
+      isError: true,
+    };
+    }
+    }
+
+    throw new Error(`Unknown tool: ${name}`);
+    });
   return server;
 }
 
