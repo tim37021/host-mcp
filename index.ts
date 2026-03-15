@@ -13,6 +13,7 @@ import * as path from "path";
 import { exec } from "child_process";
 import { promisify } from "util";
 import TurndownService from "turndown";
+import mime from "mime-types";
 
 const execAsync = promisify(exec);
 
@@ -278,6 +279,41 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (!stat.isFile()) {
         throw new Error("Path is not a file");
       }
+      
+      const mimeType = mime.lookup(validPath) || "application/octet-stream";
+      
+      // If it's an image, return it as ImageContent
+      if (mimeType.startsWith("image/")) {
+        const buffer = await fs.readFile(validPath);
+        return {
+          content: [{
+            type: "image",
+            data: buffer.toString("base64"),
+            mimeType: mimeType
+          }]
+        };
+      }
+      
+      // If it's a PDF or other binary file, return it as EmbeddedResource
+      if (mimeType === "application/pdf" || mimeType.startsWith("application/") || mimeType.startsWith("audio/") || mimeType.startsWith("video/")) {
+        const buffer = await fs.readFile(validPath);
+        const isLikelyText = mimeType === "application/json" || mimeType === "application/javascript" || mimeType === "application/xml" || mimeType === "application/x-sh";
+        
+        if (!isLikelyText) {
+          return {
+            content: [{
+              type: "resource",
+              resource: {
+                uri: `file://${validPath}`,
+                mimeType: mimeType,
+                blob: buffer.toString("base64")
+              }
+            }]
+          };
+        }
+      }
+      
+      // Fallback: Read as utf-8 text
       const content = await fs.readFile(validPath, "utf-8");
       return {
         content: [{ type: "text", text: content }],
@@ -492,6 +528,34 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     const contentType = response.headers.get("content-type") || "";
+    
+    if (contentType.startsWith("image/")) {
+      const arrayBuffer = await response.arrayBuffer();
+      const buffer = Buffer.from(arrayBuffer);
+      return {
+        content: [{
+          type: "image",
+          data: buffer.toString("base64"),
+          mimeType: contentType.split(";")[0]
+        }]
+      };
+    }
+    
+    if (contentType.includes("application/pdf") || contentType.startsWith("audio/") || contentType.startsWith("video/") || (contentType.startsWith("application/") && !contentType.includes("json") && !contentType.includes("xml") && !contentType.includes("javascript"))) {
+      const arrayBuffer = await response.arrayBuffer();
+      const buffer = Buffer.from(arrayBuffer);
+      return {
+        content: [{
+          type: "resource",
+          resource: {
+            uri: url,
+            mimeType: contentType.split(";")[0],
+            blob: buffer.toString("base64")
+          }
+        }]
+      };
+    }
+
     const text = await response.text();
 
     if (!raw && contentType.includes("text/html")) {
@@ -538,9 +602,11 @@ async function main() {
     if (rawArgs[i] === "--transport") {
       transportMode = rawArgs[++i] as "stdio" | "sse";
     } else if (rawArgs[i] === "--port") {
-      port = parseInt(rawArgs[++i], 10);
+      const portStr = rawArgs[++i];
+      if (portStr) port = parseInt(portStr, 10);
     } else {
-      args.push(rawArgs[i]);
+      const arg = rawArgs[i];
+      if (arg) args.push(arg);
     }
   }
 
@@ -564,6 +630,10 @@ async function main() {
     app.get("/sse", async (req, res) => {
       const transport = new SSEServerTransport("/messages", res);
       const sessionId = transport.sessionId;
+      if (!sessionId) {
+        res.status(500).send("Failed to create session");
+        return;
+      }
       transports.set(sessionId, transport);
       
       const server = createMcpServer();
