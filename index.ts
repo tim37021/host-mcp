@@ -294,29 +294,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
       
-      // If it's a PDF or other binary file, return it as EmbeddedResource
-      if (mimeType === "application/pdf" || mimeType.startsWith("application/") || mimeType.startsWith("audio/") || mimeType.startsWith("video/")) {
-        const buffer = await fs.readFile(validPath);
-        const isLikelyText = mimeType === "application/json" || mimeType === "application/javascript" || mimeType === "application/xml" || mimeType === "application/x-sh";
-        
-        if (!isLikelyText) {
-          return {
-            content: [{
-              type: "resource",
-              resource: {
-                uri: `file://${validPath}`,
-                mimeType: mimeType,
-                blob: buffer.toString("base64")
-              }
-            }]
-          };
-        }
+      // If it's a PDF or other known binary file, or contains null bytes, return it as EmbeddedResource
+      const buffer = await fs.readFile(validPath);
+      const isLikelyBinary = mimeType === "application/pdf" || mimeType.startsWith("audio/") || mimeType.startsWith("video/") || buffer.subarray(0, 8000).includes(0);
+      
+      if (isLikelyBinary) {
+        return {
+          content: [{
+            type: "resource",
+            resource: {
+              uri: `file://${validPath}`,
+              mimeType: mimeType,
+              blob: buffer.toString("base64")
+            }
+          }]
+        };
       }
       
       // Fallback: Read as utf-8 text
-      const content = await fs.readFile(validPath, "utf-8");
       return {
-        content: [{ type: "text", text: content }],
+        content: [{ type: "text", text: buffer.toString("utf-8") }],
       };
     } catch (error: any) {
       return {
