@@ -280,7 +280,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         throw new Error("Path is not a file");
       }
       
-      const mimeType = mime.lookup(validPath) || "application/octet-stream";
+      let mimeType = mime.lookup(validPath) || "application/octet-stream";
+      if (validPath.endsWith(".ts") || validPath.endsWith(".tsx")) {
+        mimeType = "application/typescript";
+      }
       
       // If it's an image, return it as ImageContent
       if (mimeType.startsWith("image/")) {
