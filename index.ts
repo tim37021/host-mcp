@@ -285,9 +285,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         mimeType = "application/typescript";
       }
       
-      // If it's an image, return it as ImageContent
+      const buffer = await fs.readFile(validPath);
+      const isText = !buffer.subarray(0, 8000).includes(0);
+
+      if (isText) {
+        return {
+          content: [{ type: "text", text: buffer.toString("utf-8") }],
+        };
+      }
+
+      // If it's a binary file and an image, return it as ImageContent
       if (mimeType.startsWith("image/")) {
-        const buffer = await fs.readFile(validPath);
         return {
           content: [{
             type: "image",
@@ -297,26 +305,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
       
-      // If it's a PDF or other known binary file, or contains null bytes, return it as EmbeddedResource
-      const buffer = await fs.readFile(validPath);
-      const isLikelyBinary = mimeType === "application/pdf" || mimeType.startsWith("audio/") || mimeType.startsWith("video/") || buffer.subarray(0, 8000).includes(0);
-      
-      if (isLikelyBinary) {
-        return {
-          content: [{
-            type: "resource",
-            resource: {
-              uri: `file://${validPath}`,
-              mimeType: mimeType,
-              blob: buffer.toString("base64")
-            }
-          }]
-        };
-      }
-      
-      // Fallback: Read as utf-8 text
+      // Other binary files (PDFs, audio, video, etc.) returned as EmbeddedResource
       return {
-        content: [{ type: "text", text: buffer.toString("utf-8") }],
+        content: [{
+          type: "resource",
+          resource: {
+            uri: `file://${validPath}`,
+            mimeType: mimeType,
+            blob: buffer.toString("base64")
+          }
+        }]
       };
     } catch (error: any) {
       return {
