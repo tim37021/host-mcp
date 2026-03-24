@@ -19,9 +19,11 @@
     "@types/mime-types": "^3.0.1",
     "@types/turndown": "^5.0.6",
     "cors": "^2.8.6",
+    "docxtemplater": "^3.68.3",
     "eventsource": "^4.1.0",
     "express": "^5.2.1",
     "mime-types": "^3.0.2",
+    "pizzip": "^3.2.0",
     "turndown": "^7.2.2",
     "zod": "^4.3.6"
   }

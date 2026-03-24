@@ -6,6 +6,8 @@ import cors from "cors";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
+  ListResourcesRequestSchema,
+  ReadResourceRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import * as fs from "fs/promises";
@@ -83,9 +85,13 @@ function isPathWithinAllowedDirectories(absolutePath: string, allowedDirs: strin
 }
 
 /**
- * Validates that a requested path is safe and within allowed directories.
+ * Validates that a requested path is safe, absolute, and within allowed directories.
  */
 async function validatePath(requestedPath: string): Promise<string> {
+  if (!path.isAbsolute(requestedPath)) {
+    throw new Error(`Access denied: Path must be absolute. Received: ${requestedPath}`);
+  }
+
   const absolutePath = path.resolve(requestedPath);
   if (!isPathWithinAllowedDirectories(absolutePath, allowedDirectories)) {
     throw new Error(`Access denied: Path ${absolutePath} is outside allowed directories. Use the 'get_allowed_directories' tool to see which directories are permitted.`);
@@ -113,9 +119,45 @@ function createMcpServer() {
   {
     capabilities: {
       tools: {},
+      resources: {},
     },
   }
 );
+
+server.setRequestHandler(ListResourcesRequestSchema, async () => {
+  return {
+    resources: [
+      {
+        uri: "sys://host-info",
+        name: "Host Environment Information",
+        mimeType: "application/json",
+        description: "Provides basic information about the host system, architecture, and directories the server is allowed to access.",
+      },
+    ],
+  };
+});
+
+server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+  if (request.params.uri === "sys://host-info") {
+    const hostInfo = {
+      os: process.platform,
+      arch: process.arch,
+      nodeVersion: process.version,
+      cwd: process.cwd(),
+      allowedDirectories: allowedDirectories,
+    };
+    return {
+      contents: [
+        {
+          uri: request.params.uri,
+          mimeType: "application/json",
+          text: JSON.stringify(hostInfo, null, 2),
+        },
+      ],
+    };
+  }
+  throw new Error(`Resource not found: ${request.params.uri}`);
+});
 
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
@@ -130,13 +172,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "read_file",
-        description: "Read the contents of a file on the host filesystem. Access is restricted to allowed directories.",
+        description: "Read the contents of a file on the host filesystem. Access is restricted to allowed directories. REQUIRES ABSOLUTE PATH.",
         inputSchema: {
           type: "object",
           properties: {
             path: {
               type: "string",
-              description: "Absolute or relative path to the file to read",
+              description: "Absolute path to the file to read",
             },
           },
           required: ["path"],
@@ -144,13 +186,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "list_directory",
-        description: "List the contents of a directory on the host filesystem. Access is restricted to allowed directories.",
+        description: "List the contents of a directory on the host filesystem. Access is restricted to allowed directories. REQUIRES ABSOLUTE PATH.",
         inputSchema: {
           type: "object",
           properties: {
             path: {
               type: "string",
-              description: "Absolute or relative path to the directory to list",
+              description: "Absolute path to the directory to list",
             },
           },
           required: ["path"],
@@ -158,13 +200,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "write_file",
-        description: "Write content to a file on the host filesystem. Access is restricted to allowed directories.",
+        description: "Write content to a file on the host filesystem. Access is restricted to allowed directories. REQUIRES ABSOLUTE PATH.",
         inputSchema: {
           type: "object",
           properties: {
             path: {
               type: "string",
-              description: "Absolute or relative path to the file to write",
+              description: "Absolute path to the file to write",
             },
             content: {
               type: "string",
@@ -176,13 +218,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "edit_file",
-        description: "Edit a file on the host filesystem by replacing exact string occurrences. Access is restricted to allowed directories.",
+        description: "Edit a file on the host filesystem by replacing exact string occurrences. Access is restricted to allowed directories. REQUIRES ABSOLUTE PATH.",
         inputSchema: {
           type: "object",
           properties: {
             path: {
               type: "string",
-              description: "Absolute or relative path to the file to edit",
+              description: "Absolute path to the file to edit",
             },
             edits: {
               type: "array",
@@ -210,7 +252,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "run_command",
-        description: "Execute a shell command on the host machine. If a working directory (cwd) is provided, it must be within allowed directories.",
+        description: "Execute a shell command on the host machine. A working directory (cwd) MUST be provided and must be an absolute path within allowed directories.",
         inputSchema: {
           type: "object",
           properties: {
@@ -220,10 +262,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             cwd: {
               type: "string",
-              description: "Optional working directory to run the command in",
+              description: "Absolute path to the working directory to run the command in",
             },
           },
-          required: ["command"],
+          required: ["command", "cwd"],
           },
           },
           {
@@ -359,6 +401,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     try {
       // Validate path directly (it might not exist yet, so we don't use validatePath which checks for existence)
+      if (!path.isAbsolute(parsedArgs.data.path)) {
+        throw new Error(`Access denied: Path must be absolute. Received: ${parsedArgs.data.path}`);
+      }
       const absolutePath = path.resolve(parsedArgs.data.path);
       if (!isPathWithinAllowedDirectories(absolutePath, allowedDirectories)) {
         throw new Error(`Access denied: Path ${absolutePath} is outside allowed directories. Use the 'get_allowed_directories' tool to see which directories are permitted.`);
@@ -442,33 +487,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   if (name === "run_command") {
     const parsedArgs = z
-      .object({ command: z.string(), cwd: z.string().optional() })
+      .object({ command: z.string(), cwd: z.string() })
       .safeParse(args);
     if (!parsedArgs.success) {
-      throw new Error("Invalid arguments for run_command");
+      throw new Error("Invalid arguments for run_command: 'cwd' is now required and must be an absolute path.");
     }
 
     try {
-      let runCwd: string | undefined = undefined;
-      
-      // If cwd is provided, validate it against allowed directories
-      if (parsedArgs.data.cwd) {
-        runCwd = await validatePath(parsedArgs.data.cwd);
-        const stat = await fs.stat(runCwd);
-        if (!stat.isDirectory()) {
-          throw new Error("cwd is not a directory");
-        }
-      } else {
-        // If no cwd is provided, check if the default process.cwd() is allowed.
-        // If it's not allowed, we don't necessarily want to completely fail,
-        // but it's safer to ensure they only run commands where permitted.
-        const defaultCwd = process.cwd();
-        if (!isPathWithinAllowedDirectories(defaultCwd, allowedDirectories)) {
-          // If the default working directory is outside allowed bounds,
-          // require an explicit allowed cwd.
-          throw new Error("Current working directory is outside allowed directories. Please provide a valid 'cwd' argument within the allowed directories.");
-        }
-        runCwd = defaultCwd;
+      const runCwd = await validatePath(parsedArgs.data.cwd);
+      const stat = await fs.stat(runCwd);
+      if (!stat.isDirectory()) {
+        throw new Error("cwd is not a directory");
       }
 
       const { stdout, stderr } = await execAsync(parsedArgs.data.command, {
@@ -496,7 +525,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       isError: true,
     };
     }
-    }
+  }
 
     if (name === "fetch") {
     const parsedArgs = z.object({ 
