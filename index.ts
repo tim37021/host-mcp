@@ -500,30 +500,98 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         throw new Error("cwd is not a directory");
       }
 
-      const { stdout, stderr } = await execAsync(parsedArgs.data.command, {
-        cwd: runCwd,
-      });
-      
-      const output = [
-        stdout ? `STDOUT:\n${stdout}` : "",
-        stderr ? `STDERR:\n${stderr}` : "",
-      ]
-        .filter(Boolean)
-        .join("\n\n");
+      // Extract progressToken from the request metadata
+      const progressToken = request.params._meta?.progressToken;
 
-      return {
-        content: [{ type: "text", text: output || "Command executed successfully with no output." }],
-      };
+      return new Promise((resolve, reject) => {
+        let stdoutData = "";
+        let stderrData = "";
+        let progressBytes = 0;
+
+        const child = require('child_process').spawn(parsedArgs.data.command, {
+          cwd: runCwd,
+          shell: true
+        });
+
+        child.stdout.on("data", (data: any) => {
+          const chunk = data.toString();
+          stdoutData += chunk;
+          progressBytes += chunk.length;
+          if (progressToken) {
+            server.notification({
+              method: "notifications/progress",
+              params: {
+                progressToken,
+                progress: progressBytes,
+                message: JSON.stringify({ type: "stdout", data: chunk })
+              }
+            }).catch(() => {});
+          }
+        });
+
+        child.stderr.on("data", (data: any) => {
+          const chunk = data.toString();
+          stderrData += chunk;
+          progressBytes += chunk.length;
+          if (progressToken) {
+            server.notification({
+              method: "notifications/progress",
+              params: {
+                progressToken,
+                progress: progressBytes,
+                message: JSON.stringify({ type: "stderr", data: chunk })
+              }
+            }).catch(() => {});
+          }
+        });
+
+        child.on("close", (code: number) => {
+          const output = [
+            stdoutData ? `STDOUT:\n${stdoutData}` : "",
+            stderrData ? `STDERR:\n${stderrData}` : "",
+          ]
+            .filter(Boolean)
+            .join("\n\n");
+
+          if (code !== 0) {
+            resolve({
+              content: [
+                {
+                  type: "text",
+                  text: `Command failed with code ${code}\n${output}`,
+                },
+              ],
+              isError: true,
+            });
+          } else {
+            resolve({
+              content: [{ type: "text", text: output || "Command executed successfully with no output." }],
+            });
+          }
+        });
+
+        child.on("error", (error: any) => {
+          resolve({
+            content: [
+              {
+                type: "text",
+                text: `Command failed to start: ${error.message}\nSTDOUT:\n${stdoutData}\nSTDERR:\n${stderrData}`,
+              },
+            ],
+            isError: true,
+          });
+        });
+      });
     } catch (error: any) {
-    return {
-      content: [
-        {
-          type: "text",
-          text: `Command failed: ${error.message}\nSTDOUT:\n${error.stdout || ""}\nSTDERR:\n${error.stderr || ""}`,
-        },
-      ],
-      isError: true,
-    };
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Command setup failed: ${error.message}`,
+          },
+        ],
+        isError: true,
+      };
     }
   }
 
