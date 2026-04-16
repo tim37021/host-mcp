@@ -461,14 +461,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       let totalOccurrences = 0;
       
       for (const edit of finalEdits) {
-        if (!content.includes(edit.old_string)) {
-           return {
-            content: [{ type: "text", text: `Error: The string to replace:\n\n${edit.old_string}\n\n...was not found in the file. No changes were made.` }],
+        const occurrences = content.split(edit.old_string).length - 1;
+        
+        if (occurrences === 0) {
+          return {
+            content: [{ type: "text", text: `Error: The string to replace was not found in the file. No changes were made.\n\nSearch string:\n${edit.old_string}` }],
             isError: true,
           };
         }
         
-        const occurrences = content.split(edit.old_string).length - 1;
+        if (occurrences > 1) {
+          return {
+            content: [{ type: "text", text: `Error: The string to replace is not unique! It appears ${occurrences} times in the file. Please provide a more specific search string with more context to ensure uniqueness.\n\nSearch string:\n${edit.old_string}` }],
+            isError: true,
+          };
+        }
+        
         totalOccurrences += occurrences;
         content = content.split(edit.old_string).join(edit.new_string);
       }
