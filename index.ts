@@ -110,6 +110,22 @@ async function validatePath(requestedPath: string): Promise<string> {
   return absolutePath;
 }
 
+async function listRecursive(dir: string, baseDir: string): Promise<string[]> {
+  const entries = await fs.readdir(dir, { withFileTypes: true });
+  let results: string[] = [];
+  for (const entry of entries) {
+    const resPath = path.resolve(dir, entry.name);
+    const relPath = path.relative(baseDir, resPath);
+    if (entry.isDirectory()) {
+      results.push(`[DIR] ${relPath}`);
+      results = results.concat(await listRecursive(resPath, baseDir));
+    } else {
+      results.push(`[FILE] ${relPath}`);
+    }
+  }
+  return results;
+}
+
 function createMcpServer() {
   const server = new Server(
   {
@@ -180,6 +196,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "string",
               description: "Absolute path to the file to read",
             },
+            start_line: {
+              type: "integer",
+              description: "Optional 1-indexed start line to read (inclusive)",
+            },
+            end_line: {
+              type: "integer",
+              description: "Optional 1-indexed end line to read (inclusive)",
+            },
           },
           required: ["path"],
         },
@@ -193,6 +217,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             path: {
               type: "string",
               description: "Absolute path to the directory to list",
+            },
+            recursive: {
+              type: "boolean",
+              description: "Optional flag to list contents recursively",
+              default: false,
             },
           },
           required: ["path"],
@@ -234,6 +263,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                 properties: {
                   old_string: { type: "string", description: "The exact string to replace" },
                   new_string: { type: "string", description: "The string to replace it with" },
+                  start_line: { type: "integer", description: "Optional 1-indexed start line to scope the search (inclusive)" },
+                  end_line: { type: "integer", description: "Optional 1-indexed end line to scope the search (inclusive)" },
                 },
                 required: ["old_string", "new_string"],
               },
@@ -310,9 +341,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 
   if (name === "read_file") {
-    const parsedArgs = z.object({ path: z.string() }).safeParse(args);
+    const parsedArgs = z.object({ 
+      path: z.string(),
+      start_line: z.number().int().min(1).optional(),
+      end_line: z.number().int().min(1).optional()
+    }).safeParse(args);
+    
     if (!parsedArgs.success) {
-      throw new Error("Invalid arguments for read_file");
+      throw new Error(`Invalid arguments for read_file: ${parsedArgs.error.message}`);
     }
 
     try {
@@ -331,8 +367,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const isText = !buffer.subarray(0, 8000).includes(0);
 
       if (isText) {
+        let text = buffer.toString("utf-8");
+        const { start_line, end_line } = parsedArgs.data;
+        
+        if (start_line !== undefined || end_line !== undefined) {
+          const lines = text.split("\n");
+          const start = start_line ? start_line - 1 : 0;
+          const end = end_line ? end_line : lines.length;
+          text = lines.slice(start, end).join("\n");
+        }
+
         return {
-          content: [{ type: "text", text: buffer.toString("utf-8") }],
+          content: [{ type: "text", text }],
         };
       }
 
@@ -367,7 +413,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 
   if (name === "list_directory") {
-    const parsedArgs = z.object({ path: z.string() }).safeParse(args);
+    const parsedArgs = z.object({ 
+      path: z.string(),
+      recursive: z.boolean().optional().default(false)
+    }).safeParse(args);
+    
     if (!parsedArgs.success) {
       throw new Error("Invalid arguments for list_directory");
     }
@@ -378,10 +428,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (!stat.isDirectory()) {
         throw new Error("Path is not a directory");
       }
-      const files = await fs.readdir(validPath, { withFileTypes: true });
-      const entries = files.map((file) => {
-        return `${file.isDirectory() ? "[DIR]" : "[FILE]"} ${file.name}`;
-      });
+      
+      let entries: string[] = [];
+      if (parsedArgs.data.recursive) {
+        entries = await listRecursive(validPath, validPath);
+      } else {
+        const files = await fs.readdir(validPath, { withFileTypes: true });
+        entries = files.map((file) => {
+          return `${file.isDirectory() ? "[DIR]" : "[FILE]"} ${file.name}`;
+        });
+      }
+      
       return {
         content: [{ type: "text", text: entries.length > 0 ? entries.join("\n") : "(empty directory)" }],
       };
@@ -426,7 +483,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       path: z.string(), 
       edits: z.array(z.object({
         old_string: z.string(),
-        new_string: z.string()
+        new_string: z.string(),
+        start_line: z.number().int().min(1).optional(),
+        end_line: z.number().int().min(1).optional()
       })).optional(),
       old_string: z.string().optional(),
       new_string: z.string().optional()
@@ -437,7 +496,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     const { path: filePath, edits, old_string, new_string } = parsedArgs.data;
-    const finalEdits = edits || [];
+    const finalEdits: Array<{old_string: string, new_string: string, start_line?: number, end_line?: number}> = edits || [];
     
     if (old_string !== undefined && new_string !== undefined) {
       finalEdits.push({ old_string, new_string });
@@ -461,24 +520,54 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       let totalOccurrences = 0;
       
       for (const edit of finalEdits) {
-        const occurrences = content.split(edit.old_string).length - 1;
+        const { old_string, new_string, start_line, end_line } = edit;
         
-        if (occurrences === 0) {
-          return {
-            content: [{ type: "text", text: `Error: The string to replace was not found in the file. No changes were made.\n\nSearch string:\n${edit.old_string}` }],
-            isError: true,
-          };
+        if (start_line !== undefined || end_line !== undefined) {
+          const lines = content.split("\n");
+          const start = start_line ? start_line - 1 : 0;
+          const end = end_line ? end_line : lines.length;
+          
+          const targetChunk = lines.slice(start, end).join("\n");
+          const occurrences = targetChunk.split(old_string).length - 1;
+          
+          if (occurrences === 0) {
+            return {
+              content: [{ type: "text", text: `Error: The string to replace was not found in the specified line range [${start+1}, ${end}]. No changes were made.\n\nSearch string:\n${old_string}` }],
+              isError: true,
+            };
+          }
+          
+          if (occurrences > 1) {
+            return {
+              content: [{ type: "text", text: `Error: The string to replace is not unique within the specified line range [${start+1}, ${end}]! It appears ${occurrences} times. Please provide a more specific search string or narrower range.\n\nSearch string:\n${old_string}` }],
+              isError: true,
+            };
+          }
+          
+          const replacedChunk = targetChunk.replace(old_string, new_string);
+          lines.splice(start, end - start, replacedChunk);
+          content = lines.join("\n");
+          totalOccurrences += occurrences;
+        } else {
+          const occurrences = content.split(old_string).length - 1;
+          
+          if (occurrences === 0) {
+            return {
+              content: [{ type: "text", text: `Error: The string to replace was not found in the file. No changes were made.\n\nSearch string:\n${old_string}` }],
+              isError: true,
+            };
+          }
+          
+          if (occurrences > 1) {
+            return {
+              content: [{ type: "text", text: `Error: The string to replace is not unique! It appears ${occurrences} times in the file. Please provide a more specific search string with more context to ensure uniqueness.\n\nSearch string:\n${old_string}` }],
+              isError: true,
+            };
+          }
+          
+          totalOccurrences += occurrences;
+          content = content.split(old_string).join(new_string);
         }
-        
-        if (occurrences > 1) {
-          return {
-            content: [{ type: "text", text: `Error: The string to replace is not unique! It appears ${occurrences} times in the file. Please provide a more specific search string with more context to ensure uniqueness.\n\nSearch string:\n${edit.old_string}` }],
-            isError: true,
-          };
-        }
-        
-        totalOccurrences += occurrences;
-        content = content.split(edit.old_string).join(edit.new_string);
       }
       
       await fs.writeFile(validPath, content, "utf-8");
